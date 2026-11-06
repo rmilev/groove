@@ -85,7 +85,7 @@ object Shazam {
             colors = images?.optString("joecolor")?.takeIf { it.isNotBlank() },
             // "background" is the artist's photo; for artists without one it's just the cover again
             artistImage = images?.optString("background")?.takeIf { it.isNotBlank() && imageFile(it) != art?.let(::imageFile) }
-                ?.replace(Regex("""/\d+x\d+(cc|bb)?\.(jpg|png|webp)$"""), "/2000x2000cc.jpg"),
+                ?.replace(Regex("""/\d+x\d+(cc|bb)?\.(jpg|png|webp)$"""), "/1400x1400cc.jpg"),
         )
     }
 

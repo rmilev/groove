@@ -26,8 +26,8 @@ data class NowPlaying(
     val lyrics: Lyrics? = null,
     val lyricsLoading: Boolean = true,
     val art: ImageBitmap? = null,
-    /** The artist's photo, for the background. */
-    val artistImage: ImageBitmap? = null,
+    /** Photos of the artist for the background, shown in turn; filled in as they load. */
+    val artistImages: List<ImageBitmap> = emptyList(),
     /** At [anchorNanos] (System.nanoTime) the song was at [anchorMs]. */
     val anchorNanos: Long,
     val anchorMs: Long,
@@ -66,7 +66,11 @@ class Engine(testFile: java.io.File? = null) {
 
     private val lyricsCache = HashMap<String, Lyrics?>()
     private val artCache = HashMap<String, ImageBitmap?>()
-    private val photoCache = HashMap<String, ImageBitmap?>()
+    /** Artist photos by artist, so the next song by the same artist starts with them. Only a few artists are kept. */
+    private val photoCache = object : LinkedHashMap<String, MutableList<ImageBitmap>>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, MutableList<ImageBitmap>>?) = size > 3
+    }
+    private val photoLoads = HashSet<String>()
 
     @Volatile private var resyncRequested = false
 
@@ -261,14 +265,14 @@ class Engine(testFile: java.io.File? = null) {
                 ended = false,
                 now = NowPlaying(
                     match, lyrics = cachedLyrics, lyricsLoading = !lyricsCache.containsKey(match.key),
-                    art = artCache[match.key], artistImage = photoCache[match.key], anchorNanos = clip.startNanos, anchorMs = match.offsetMs,
+                    art = artCache[match.key], artistImages = photoCache[artistKey(match)]?.toList().orEmpty(), anchorNanos = clip.startNanos, anchorMs = match.offsetMs,
                 ),
             )
         }
         Log.i(TAG, "now playing ${match.artist} – ${match.title} at ${match.offsetMs} ms")
         if (!lyricsCache.containsKey(match.key)) scope.launch { loadLyrics(match) }
         if (!artCache.containsKey(match.key)) scope.launch { loadArt(match) }
-        if (!photoCache.containsKey(match.key)) scope.launch { loadPhoto(match) }
+        if (photoLoads.add(artistKey(match))) scope.launch { loadPhotos(match) }
         misses = 0
         lastMatchNanos = System.nanoTime()
         nextCheckNanos = System.nanoTime() + CHECK_EVERY_MS * 1_000_000
@@ -302,10 +306,25 @@ class Engine(testFile: java.io.File? = null) {
         _state.update { s -> if (s.now?.match?.key != match.key) s else s.copy(now = s.now.copy(art = bitmap)) }
     }
 
-    private suspend fun loadPhoto(match: Match) {
-        val bitmap = match.artistImage?.let { fetchImage(it) }
-        photoCache[match.key] = bitmap
-        _state.update { s -> if (s.now?.match?.key != match.key) s else s.copy(now = s.now.copy(artistImage = bitmap)) }
+    private fun artistKey(match: Match) = AudioDb.key(Lrclib.mainArtist(match.artist))
+
+    /** Shazam's artist photo first (quick), then TheAudioDB's widescreen ones as they arrive. */
+    private suspend fun loadPhotos(match: Match) {
+        val key = artistKey(match)
+        val list = mutableListOf<ImageBitmap>()
+        fun publish() {
+            photoCache[key] = list
+            _state.update { s ->
+                val np = s.now
+                if (np == null || artistKey(np.match) != key) s else s.copy(now = np.copy(artistImages = list.toList()))
+            }
+        }
+        match.artistImage?.let { fetchImage(it) }?.let { list += it; publish() }
+        val more = runCatching { withContext(Dispatchers.IO) { AudioDb.photos(match.artist) } }
+            .onFailure { Log.w(TAG, "artist photos failed", it) }.getOrDefault(emptyList())
+        Log.i(TAG, "${more.size} more photos of ${match.artist}")
+        for (url in more) fetchImage(url)?.let { list += it; publish() }
+        if (list.isEmpty()) photoLoads.remove(key) // try again next time
     }
 
     private suspend fun fetchImage(url: String): ImageBitmap? {

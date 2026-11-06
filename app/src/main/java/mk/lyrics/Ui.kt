@@ -40,6 +40,9 @@ import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -264,6 +267,19 @@ private fun NowPlayingScreen(np: NowPlaying, design: Design, offsetMs: Long, lis
     LaunchedEffect(np) { while (true) withFrameNanos { position = np.positionAt(it) + offsetMs } }
     val theme = themeOf(np.match.colors)
     val pos = { position }
+    // Move on to the next artist photo now and then
+    var photoTurn by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(np.match.key) { while (true) { delay(PHOTO_EVERY_MS); photoTurn++ } }
+    val photos = np.artistImages
+    val photo = if (photos.isEmpty()) null else photos[(photoTurn % photos.size).toInt()]
+    CompositionLocalProvider(LocalPhoto provides photo) { Designs(np, design, theme, pos, listening) }
+}
+
+private const val PHOTO_EVERY_MS = 40_000L
+private val LocalPhoto = staticCompositionLocalOf<ImageBitmap?> { null }
+
+@Composable
+private fun Designs(np: NowPlaying, design: Design, theme: Theme, pos: () -> Long, listening: Boolean) {
     when (design) {
         Design.Stage -> Stage(np, theme, pos, listening)
         Design.Glass -> Glass(np, theme, pos, listening)
@@ -274,9 +290,10 @@ private fun NowPlayingScreen(np: NowPlaying, design: Design, offsetMs: Long, lis
 /** The artist's photo; without one, the cover blown up and blurred so it reads as colour and texture. */
 @Composable
 private fun Backdrop(np: NowPlaying, modifier: Modifier, blur: Dp = 0.dp, alignment: Alignment = Alignment.TopCenter, scale: Float = 1f) {
-    Crossfade(np.artistImage ?: np.art, modifier, animationSpec = tween(1_000), label = "backdrop") { img ->
+    val artist = LocalPhoto.current
+    Crossfade(artist ?: np.art, modifier, animationSpec = tween(2_000), label = "backdrop") { img ->
         if (img != null) {
-            val photo = img === np.artistImage
+            val photo = img !== np.art
             Image(
                 img, null, contentScale = ContentScale.Crop, alignment = alignment,
                 modifier = Modifier.fillMaxSize()
