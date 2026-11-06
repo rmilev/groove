@@ -8,7 +8,7 @@ import kotlin.math.abs
 
 /** MusicBrainz (musicbrainz.org): full artist credits, for songs where Shazam names only the main artist. */
 object MusicBrainz {
-    private const val AGENT = "Groove/1.3 (https://github.com/rmilev/mk-tv)"
+    private const val AGENT = "Groove/1.3 (https://github.com/rmilev/groove)"
 
     /**
      * The fullest credit MusicBrainz has for this recording, e.g. "Vince Staples feat. Kendrick Lamar & KUČKA",
