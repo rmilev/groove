@@ -26,6 +26,8 @@ data class NowPlaying(
     val lyrics: Lyrics? = null,
     val lyricsLoading: Boolean = true,
     val art: ImageBitmap? = null,
+    /** The artist's photo, for the background. */
+    val artistImage: ImageBitmap? = null,
     /** At [anchorNanos] (System.nanoTime) the song was at [anchorMs]. */
     val anchorNanos: Long,
     val anchorMs: Long,
@@ -52,7 +54,9 @@ data class UiState(
  * Listens all the time, recognizes, and keeps the lyrics in time:
  * - while searching, tries growing clips (4, 7, 10 s) then every 8 s;
  * - once a song is known, re-checks every 8 s, so a skip, a seek or a new song shows within seconds;
- * - a break in the sound (a skip, the groove between tracks) brings the next check forward to 3.5 s after it.
+ * - a break in the sound (a skip, the groove between tracks) brings the next check forward to 3.5 s after it;
+ * - talk over the music or a repeated chorus can't knock it off: misses keep the lyrics running, and a jump within
+ *   the song must be confirmed by a second check.
  */
 class Engine(testFile: java.io.File? = null) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -62,6 +66,7 @@ class Engine(testFile: java.io.File? = null) {
 
     private val lyricsCache = HashMap<String, Lyrics?>()
     private val artCache = HashMap<String, ImageBitmap?>()
+    private val photoCache = HashMap<String, ImageBitmap?>()
 
     @Volatile private var resyncRequested = false
 
@@ -69,7 +74,6 @@ class Engine(testFile: java.io.File? = null) {
     private var points = mutableListOf<Pair<Long, Long>>()
     private var nextCheckNanos = 0L
     private var misses = 0
-    private var quietSince = 0L
 
     // Search from this mic mark on, so audio from the previous song isn't mixed in
     private var searchMark = 0L
@@ -121,14 +125,21 @@ class Engine(testFile: java.io.File? = null) {
 
     private suspend fun search(now: Long) {
         if (now < backoffUntil) return
+        val shown = _state.value.now
+        if (shown != null && !_state.value.ended) {
+            // Still showing the last song while looking: give up on it once it should be over, or nothing has matched for a while
+            val over = shown.durationMs?.let { shown.positionAt(now) > it + 1_000 } == true
+            if (over || now - lastMatchNanos > GIVE_UP_MS * 1_000_000) _state.update { it.copy(ended = true) }
+        }
         // Sound coming back after silence: start over with only the new audio
         gapJustEnded(minQuietMs = 600)?.let { searchMark = it; searchAttempts = 0 }
         val recorded = mic.recordedSince(searchMark)
-        val wanted = when (searchAttempts) { 0 -> 4_000L; 1 -> 7_000L; 2 -> 10_000L; else -> 10_000L }
+        val wanted = when (searchAttempts) { 0 -> 4_000L; 1 -> 7_000L; else -> 10_000L }
         val spacing = when {
             searchAttempts < 3 -> 0L
             searchAttempts < 20 -> 8_000L
-            else -> 20_000L // nothing recognizable for a few minutes: ask less often
+            searchAttempts < 60 -> 20_000L // nothing recognizable for a few minutes: ask less often
+            else -> 60_000L
         }.let { if (now < slowUntil) max(it, 20_000L) else it }
         val forced = resyncRequested.also { resyncRequested = false }
         if (!forced && (recorded < wanted || now - lastRequestNanos < spacing * 1_000_000)) return
@@ -137,31 +148,27 @@ class Engine(testFile: java.io.File? = null) {
         val match = recognize(clip)
         searchAttempts++
         if (match != null) show(match, clip)
-        else if (searchAttempts >= 2 && !_state.value.ended) _state.update { it.copy(ended = true) } // changed to something unknown
     }
 
     // ----- following a known song: keep listening so skips, seeks and song changes are caught within seconds
 
     private var checkSince = 0L
+    private var gapCheck = false
+    private var lastMatchNanos = 0L
+    /** A match that put us somewhere else in the same song; acted on only once a second check agrees. */
+    private var pendingJump: Pair<Long, Long>? = null
 
     private suspend fun follow(now: Long) {
         val np = _state.value.now ?: return
-        val pos = np.positionAt(now)
         val duration = np.durationMs
 
-        // Music stopped
-        if (mic.level(1_000) < max(mic.floor() + 4, SILENT_DB)) {
-            if (quietSince == 0L) quietSince = now
-            if (now - quietSince > 12_000_000_000L) return startSearching()
-            return
-        } else quietSince = 0L
-
         // Song ran out: the next one is starting
-        if (duration != null && pos > duration + 1_000) return startSearching()
+        if (duration != null && np.positionAt(now) > duration + 1_000) return beginSearch(ended = true)
 
         // A break in the sound (a skip, or the groove between tracks): check again as soon as there's enough new audio
         gapJustEnded(minQuietMs = 250)?.let { mark ->
             checkSince = mark
+            gapCheck = true
             nextCheckNanos = now + (GAP_CHECK_MS - mic.recordedSince(mark)).coerceAtLeast(0) * 1_000_000
         }
 
@@ -169,24 +176,49 @@ class Engine(testFile: java.io.File? = null) {
         if (!forced && now < nextCheckNanos) return
         if (!forced && now < backoffUntil) return
         val since = checkSince.also { checkSince = 0L }
+        val wasGapCheck = gapCheck.also { gapCheck = false }
         val clip = mic.clip(CHECK_CLIP_MS, since = since) ?: return
         if (clip.durationMs < 3_000) return
         val match = recognize(clip)
         val interval = if (now < slowUntil) 20_000L else CHECK_EVERY_MS
+        nextCheckNanos = now + interval * 1_000_000
         when {
             match == null -> {
-                misses++
+                // Talking over the music or a quiet passage can spoil a check; keep the lyrics going.
+                // Only after several misses in a row look for a new song (still showing this one meanwhile).
+                if (!wasGapCheck) misses++
                 nextCheckNanos = now + 5_000_000_000L
-                // Two misses in a row while music plays: something we can't identify replaced the song
-                if (misses >= 2) startSearching()
+                if (misses >= 3) beginSearch(ended = false)
             }
             match.key != np.match.key -> show(match, clip)
-            else -> {
-                misses = 0
-                points += clip.startNanos to match.offsetMs
-                refine(np)
-                nextCheckNanos = now + interval * 1_000_000
-            }
+            else -> sameSong(np, clip, match)
+        }
+    }
+
+    /** A check heard the song we're showing: keep the timing, or move it if a jump is confirmed. */
+    private fun sameSong(np: NowPlaying, clip: Clip, match: Match) {
+        misses = 0
+        lastMatchNanos = System.nanoTime()
+        _state.update { it.copy(searching = false, ended = false) }
+        val drift = np.positionAt(clip.startNanos) - match.offsetMs
+        if (abs(drift) <= JUMP_MS) {
+            pendingJump = null
+            points += clip.startNanos to match.offsetMs
+            refine(np)
+            return
+        }
+        // Somewhere else in the song: a real seek, or just a repeated chorus matching another spot. Confirm first.
+        val pj = pendingJump
+        val elapsed = (clip.startNanos - (pj?.first ?: 0)) / 1_000_000
+        if (pj != null && abs((match.offsetMs - pj.second) - elapsed) <= JUMP_MS) {
+            Log.i(TAG, "seek in ${np.match.title}: ${-drift} ms (confirmed)")
+            pendingJump = null
+            points = mutableListOf(pj, clip.startNanos to match.offsetMs)
+            _state.update { s -> s.copy(now = s.now?.copy(anchorNanos = clip.startNanos, anchorMs = match.offsetMs, rate = 1.0)) }
+        } else {
+            Log.i(TAG, "possible seek in ${np.match.title}: ${-drift} ms, checking again")
+            pendingJump = clip.startNanos to match.offsetMs
+            nextCheckNanos = System.nanoTime() + 3_000_000_000L
         }
     }
 
@@ -194,13 +226,6 @@ class Engine(testFile: java.io.File? = null) {
     private fun refine(np: NowPlaying) {
         val (t1, p1) = points.last()
         val drift = np.positionAt(t1) - p1
-        if (abs(drift) > 1_500) {
-            // Jumped within the song (seek, or the needle moved): start the fit over
-            Log.i(TAG, "seek in ${np.match.title}: ${drift} ms")
-            points = mutableListOf(t1 to p1)
-            _state.update { s -> s.copy(now = s.now?.copy(anchorNanos = t1, anchorMs = p1, rate = 1.0)) }
-            return
-        }
         if (points.size > 8) points = points.takeLast(8).toMutableList()
         var rate = 1.0
         val first = points.first()
@@ -215,38 +240,37 @@ class Engine(testFile: java.io.File? = null) {
         _state.update { s -> s.copy(now = s.now?.copy(anchorNanos = t1, anchorMs = p1, rate = rate)) }
     }
 
-    private fun startSearching() {
+    /** Look for a (new) song. [ended]: the shown song is over, so show the listening screen meanwhile. */
+    private fun beginSearch(ended: Boolean) {
         searchMark = mic.mark()
         searchAttempts = 0
-        quietSince = 0L
-        _state.update { it.copy(searching = true, ended = true) }
+        misses = 0
+        pendingJump = null
+        _state.update { it.copy(searching = true, ended = it.ended || ended) }
     }
 
     private suspend fun show(match: Match, clip: Clip) {
         val previous = _state.value.now
-        if (previous != null && previous.match.key == match.key) {
-            // Same song again (e.g. after a pause or a false gap): keep it, just re-anchor
-            points += clip.startNanos to match.offsetMs
-            _state.update { it.copy(searching = false, ended = false, now = previous.copy(anchorNanos = clip.startNanos, anchorMs = match.offsetMs)) }
-        } else {
-            points = mutableListOf(clip.startNanos to match.offsetMs)
-            val cachedLyrics = lyricsCache[match.key]
-            _state.update {
-                it.copy(
-                    searching = false,
-                    ended = false,
-                    now = NowPlaying(
-                        match, lyrics = cachedLyrics, lyricsLoading = !lyricsCache.containsKey(match.key),
-                        art = artCache[match.key], anchorNanos = clip.startNanos, anchorMs = match.offsetMs,
-                    ),
-                )
-            }
-            Log.i(TAG, "now playing ${match.artist} – ${match.title} at ${match.offsetMs} ms")
-            if (!lyricsCache.containsKey(match.key)) scope.launch { loadLyrics(match) }
-            if (!artCache.containsKey(match.key)) scope.launch { loadArt(match) }
+        if (previous != null && previous.match.key == match.key) return sameSong(previous, clip, match)
+        points = mutableListOf(clip.startNanos to match.offsetMs)
+        pendingJump = null
+        val cachedLyrics = lyricsCache[match.key]
+        _state.update {
+            it.copy(
+                searching = false,
+                ended = false,
+                now = NowPlaying(
+                    match, lyrics = cachedLyrics, lyricsLoading = !lyricsCache.containsKey(match.key),
+                    art = artCache[match.key], artistImage = photoCache[match.key], anchorNanos = clip.startNanos, anchorMs = match.offsetMs,
+                ),
+            )
         }
+        Log.i(TAG, "now playing ${match.artist} – ${match.title} at ${match.offsetMs} ms")
+        if (!lyricsCache.containsKey(match.key)) scope.launch { loadLyrics(match) }
+        if (!artCache.containsKey(match.key)) scope.launch { loadArt(match) }
+        if (!photoCache.containsKey(match.key)) scope.launch { loadPhoto(match) }
         misses = 0
-        quietSince = 0L
+        lastMatchNanos = System.nanoTime()
         nextCheckNanos = System.nanoTime() + CHECK_EVERY_MS * 1_000_000
     }
 
@@ -273,7 +297,18 @@ class Engine(testFile: java.io.File? = null) {
     }
 
     private suspend fun loadArt(match: Match) {
-        val url = match.artwork ?: return
+        val bitmap = match.artwork?.let { fetchImage(it) }
+        artCache[match.key] = bitmap
+        _state.update { s -> if (s.now?.match?.key != match.key) s else s.copy(now = s.now.copy(art = bitmap)) }
+    }
+
+    private suspend fun loadPhoto(match: Match) {
+        val bitmap = match.artistImage?.let { fetchImage(it) }
+        photoCache[match.key] = bitmap
+        _state.update { s -> if (s.now?.match?.key != match.key) s else s.copy(now = s.now.copy(artistImage = bitmap)) }
+    }
+
+    private suspend fun fetchImage(url: String): ImageBitmap? {
         fun fetch(u: String) = (URL(u).openConnection() as HttpURLConnection).let { conn ->
             try { conn.connectTimeout = 8_000; conn.readTimeout = 10_000; conn.inputStream.use { BitmapFactory.decodeStream(it) } }
             finally { conn.disconnect() }
@@ -281,11 +316,10 @@ class Engine(testFile: java.io.File? = null) {
         val bitmap = withContext(Dispatchers.IO) {
             runCatching { fetch(url) }
                 .recoverCatching { if (it is javax.net.ssl.SSLException) fetch(url.replaceFirst("https://", "http://")) else throw it }
-                .onFailure { Log.w(TAG, "art failed for $url", it) }.getOrNull()
+                .onFailure { Log.w(TAG, "image failed for $url", it) }.getOrNull()
         }?.asImageBitmap()
-        Log.i(TAG, "art ${if (bitmap != null) "${bitmap.width}x${bitmap.height}" else "missing"}")
-        artCache[match.key] = bitmap
-        _state.update { s -> if (s.now?.match?.key != match.key) s else s.copy(now = s.now.copy(art = bitmap)) }
+        Log.i(TAG, "image ${if (bitmap != null) "${bitmap.width}x${bitmap.height}" else "missing"} ${url.substringAfterLast("/v4/").take(40)}")
+        return bitmap
     }
 
     /**
@@ -330,7 +364,11 @@ class Engine(testFile: java.io.File? = null) {
 
     companion object {
         private const val TAG = "Lyrics"
-        private const val SILENT_DB = -70f
+        private const val SILENT_DB = -66f
+        /** Positions further apart than this are a jump, not drift. */
+        private const val JUMP_MS = 1_500L
+        /** Drop to the listening screen after this long without hearing the shown song. */
+        private const val GIVE_UP_MS = 40_000L
         private const val GAP_DROP_DB = 14f
         private const val GAP_RESUME_MS = 600L
         /** Re-check a known song this often. */

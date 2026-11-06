@@ -19,6 +19,8 @@ data class Match(
     val timeSkew: Double,
     /** Shazam's colours for the artwork, e.g. "b:4d453cp:f2dbc4s:f3d2af…" (background, primary, secondary). */
     val colors: String? = null,
+    /** A photo of the artist, when Shazam has one. */
+    val artistImage: String? = null,
 )
 
 /** Shazam's recognition endpoint, used the same way as SongRec and Audile. */
@@ -81,8 +83,13 @@ object Shazam {
             offsetMs = (m.optDouble("offset", 0.0) * 1000).toLong(),
             timeSkew = m.optDouble("timeskew", 0.0),
             colors = images?.optString("joecolor")?.takeIf { it.isNotBlank() },
+            // "background" is the artist's photo; for artists without one it's just the cover again
+            artistImage = images?.optString("background")?.takeIf { it.isNotBlank() && imageFile(it) != art?.let(::imageFile) }
+                ?.replace(Regex("""/\d+x\d+(cc|bb)?\.(jpg|png|webp)$"""), "/2000x2000cc.jpg"),
         )
     }
+
+    private fun imageFile(url: String) = url.substringBeforeLast('/')
 
     /** Apple's artwork URLs carry their size; ask for a big one. */
     private fun largeArtwork(url: String) = url.replace(Regex("""/\d+x\d+(cc|bb)?\.(jpg|png|webp)$"""), "/1200x1200cc.jpg")

@@ -31,6 +31,8 @@ class MainActivity : ComponentActivity() {
                 permission = permission,
                 initialOffsetMs = prefs.getLong("offsetMs", 0),
                 onOffset = { prefs.edit().putLong("offsetMs", it).apply() },
+                initialDesign = Design.entries.firstOrNull { it.name == prefs.getString("design", null) } ?: Design.Stage,
+                onDesign = { prefs.edit().putString("design", it.name).apply() },
                 onResync = { engine?.resync() },
                 onAskPermission = { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1) },
             )
