@@ -27,7 +27,15 @@ data class Match(
 object Shazam {
     class RateLimited : Exception("Shazam asked us to slow down")
 
-    private val device = UUID.randomUUID().toString().uppercase() to UUID.randomUUID().toString()
+    // Shazam throttles a device ID that asks often, then answers "no match" to everything from it.
+    // Like Audile, use a fresh ID (and a common Android user agent) for every request.
+    private val agents = listOf(
+        "Dalvik/2.1.0 (Linux; U; Android 14; BRAVIA 4K AE1 Build/UTT3.240625.001)",
+        "Dalvik/2.1.0 (Linux; U; Android 13; Pixel 6 Build/TQ3A.230901.001)",
+        "Dalvik/2.1.0 (Linux; U; Android 14; SM-S911B Build/UP1A.231005.007)",
+        "Dalvik/2.1.0 (Linux; U; Android 12; Chromecast Build/STTE.230319.008)",
+        "Dalvik/2.1.0 (Linux; U; Android 13; moto g54 5G Build/T1TDS33.75-38-1-6)",
+    )
 
     /** Sends a signature; returns Shazam's JSON reply. */
     fun request(signatureUri: String, sampleMs: Long): String {
@@ -35,7 +43,7 @@ object Shazam {
         val body = """{"geolocation":{"altitude":${Random.nextDouble(100.0, 500.0)},"latitude":${Random.nextDouble(-90.0, 90.0)},"longitude":${Random.nextDouble(-180.0, 180.0)}},""" +
             """"signature":{"samplems":$sampleMs,"timestamp":$now,"uri":"$signatureUri"},"timestamp":$now,"timezone":"Europe/Skopje"}"""
         val url = URL(
-            "https://amp.shazam.com/discovery/v5/en/US/android/-/tag/${device.first}/${device.second}" +
+            "https://amp.shazam.com/discovery/v5/en/US/android/-/tag/${UUID.randomUUID().toString().uppercase()}/${UUID.randomUUID()}" +
                 "?sync=true&webv3=true&sampling=true&connected=&shazamapiversion=v3&sharehub=true&video=v3",
         )
         val conn = url.openConnection() as HttpURLConnection
@@ -45,7 +53,7 @@ object Shazam {
             conn.readTimeout = 10_000
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
-            conn.setRequestProperty("User-Agent", "Dalvik/2.1.0 (Linux; U; Android 14; BRAVIA 4K Build/UTT3.240625.001)")
+            conn.setRequestProperty("User-Agent", agents.random())
             conn.setRequestProperty("Content-Language", "en_US")
             conn.outputStream.use { it.write(body.toByteArray()) }
             if (conn.responseCode == 429) throw RateLimited()

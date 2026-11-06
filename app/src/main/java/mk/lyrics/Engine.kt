@@ -57,13 +57,13 @@ data class UiState(
 /**
  * Listens all the time, recognizes, and keeps the lyrics in time:
  * - while searching, tries growing clips (4, 7, 10 s) then every 8 s;
- * - once a song is known, re-checks every 5 s, so a skip, a seek or a new song shows within seconds;
+ * - once a song is known, re-checks every 10 s, so a skip, a seek or a new song shows within seconds;
  * - a break in the sound (a skip, the groove between tracks) or a sudden jump in loudness brings the next check
  *   forward to 3 s after it, with one retry 2 s later;
  * - talk over the music or a repeated chorus can't knock it off: misses keep the lyrics running, and a jump within
  *   the song must be confirmed by a second check.
  */
-class Engine(testFile: java.io.File? = null) {
+class Engine(testFile: java.io.File? = null, private val debugDir: java.io.File? = null) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val mic = Mic(testFile)
     private val _state = MutableStateFlow(UiState())
@@ -119,8 +119,8 @@ class Engine(testFile: java.io.File? = null) {
                 if (_state.value.now == null || _state.value.searching) search(now) else follow(now)
             } catch (e: Shazam.RateLimited) {
                 Log.w(TAG, "rate limited")
-                backoffUntil = now + 30_000_000_000L
-                slowUntil = now + 600_000_000_000L
+                backoffUntil = now + 20_000_000_000L
+                slowUntil = now + 300_000_000_000L
             } catch (e: Exception) {
                 Log.w(TAG, "step failed", e)
                 _state.update { it.copy(offline = e is java.io.IOException) }
@@ -151,7 +151,7 @@ class Engine(testFile: java.io.File? = null) {
             else -> 60_000L
         }.let { if (now < slowUntil) max(it, 20_000L) else it }
         val forced = resyncRequested.also { resyncRequested = false }
-        if (!forced && (recorded < wanted || now - lastRequestNanos < spacing * 1_000_000)) return
+        if (!forced && (recorded < wanted || now - lastRequestNanos < max(spacing, MIN_GAP_MS) * 1_000_000)) return
         if (!forced && mic.level(3_000) < SILENT_DB) return // nothing playing
         val clip = mic.clip(minOf(recorded, 10_000L), since = if (searchAttempts < 3) searchMark else 0) ?: return
         val match = recognize(clip)
@@ -207,6 +207,7 @@ class Engine(testFile: java.io.File? = null) {
         val forced = resyncRequested.also { resyncRequested = false }
         if (!forced && now < nextCheckNanos) return
         if (!forced && now < backoffUntil) return
+        if (now - lastRequestNanos < MIN_GAP_MS * 1_000_000) return
         val since = checkSince.also { checkSince = 0L }
         val wasGapCheck = gapCheck.also { gapCheck = false }
         val clip = mic.clip(CHECK_CLIP_MS, since = since) ?: return
@@ -219,7 +220,7 @@ class Engine(testFile: java.io.File? = null) {
                 // Talking over the music or a quiet passage can spoil a check; keep the lyrics going.
                 // Only after several misses in a row look for a new song (still showing this one meanwhile).
                 if (!wasGapCheck) misses++
-                nextCheckNanos = now + 5_000_000_000L
+                nextCheckNanos = now + (if (now < slowUntil) 20_000L else 6_000L) * 1_000_000
                 // Right after a break the new song may need a little more audio: try once more soon, from the break on
                 if (wasGapCheck && gapRetry) {
                     gapRetry = false
@@ -325,6 +326,15 @@ class Engine(testFile: java.io.File? = null) {
         _state.update { it.copy(busy = true) }
         try {
             val pcm = normalize(clip.samples)
+            // Debug (adb only): with a "debug" file in the app's files dir, keep the last clips sent
+            debugDir?.takeIf { java.io.File(it, "debug").exists() }?.let { dir ->
+                runCatching {
+                    val buf = java.nio.ByteBuffer.allocate(pcm.size * 2).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    pcm.forEach { buf.putShort(it) }
+                    java.io.File(dir, "clip-${System.currentTimeMillis() % 100_000}.raw").writeBytes(buf.array())
+                    dir.listFiles { f -> f.name.startsWith("clip-") }?.sortedBy { it.lastModified() }?.dropLast(6)?.forEach { it.delete() }
+                }
+            }
             val json = withContext(Dispatchers.IO) { Shazam.request(Signature.fromPcm(pcm), clip.durationMs) }
             _state.update { it.copy(offline = false) }
             return Shazam.parse(json).also { Log.i(TAG, "recognize ${clip.durationMs} ms → ${it?.title ?: "no match"}") }
@@ -447,7 +457,9 @@ class Engine(testFile: java.io.File? = null) {
         private const val GAP_DROP_DB = 14f
         private const val GAP_RESUME_MS = 600L
         /** Re-check a known song this often. */
-        private const val CHECK_EVERY_MS = 5_000L
+        private const val CHECK_EVERY_MS = 10_000L
+        /** Never ask Shazam more often than this. */
+        private const val MIN_GAP_MS = 4_000L
         private const val CHECK_CLIP_MS = 4_500L
         /** After a break in the sound, check once this much new audio is in. */
         private const val GAP_CHECK_MS = 3_000L

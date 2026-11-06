@@ -50,7 +50,7 @@ class MainActivity : ComponentActivity() {
         if (engine != null) return
         // Test hook (adb only): am start -n mk.lyrics/.MainActivity --es testPcm <name in the app's files dir>
         val test = intent.getStringExtra("testPcm")?.let { java.io.File(getExternalFilesDir(null), it) }?.takeIf { it.exists() }
-        val e = Engine(test).also { engine = it }
+        val e = Engine(test, getExternalFilesDir(null)).also { engine = it }
         e.start()
         forward = main.launch { e.state.collect { stateFlow.value = it } }
     }
