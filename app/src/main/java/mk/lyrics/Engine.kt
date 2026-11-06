@@ -137,7 +137,7 @@ class Engine(testFile: java.io.File? = null) {
         val shown = _state.value.now
         if (shown != null && !_state.value.ended) {
             // Still showing the last song while looking: give up on it once it should be over, or nothing has matched for a while
-            val over = shown.durationMs?.let { shown.positionAt(now) > it + 1_000 } == true
+            val over = shown.durationMs?.let { shown.positionAt(now) > it + RAN_OUT_GRACE_MS } == true
             if (over || now - lastMatchNanos > GIVE_UP_MS * 1_000_000) _state.update { it.copy(ended = true) }
         }
         // Sound coming back after silence: start over with only the new audio
@@ -192,8 +192,8 @@ class Engine(testFile: java.io.File? = null) {
         val np = _state.value.now ?: return
         val duration = np.durationMs
 
-        // Song ran out: the next one is starting
-        if (duration != null && np.positionAt(now) > duration + 1_000) return beginSearch(ended = true)
+        // Song ran out: look for the next one, still showing this one until it's found (or it's clearly over)
+        if (duration != null && np.positionAt(now) > duration + 1_000) return beginSearch(ended = false)
 
         // A break in the sound (a skip, or the groove between tracks): check again as soon as there's enough new audio
         // A sudden jump in loudness does the same: a skip doesn't always leave silence the mic can hear
@@ -239,6 +239,13 @@ class Engine(testFile: java.io.File? = null) {
         misses = 0
         lastMatchNanos = System.nanoTime()
         _state.update { it.copy(searching = false, ended = false) }
+        // Shazam hears the song past where LRCLIB says it ends: our copy is a longer version, so forget that length
+        val duration = np.durationMs
+        if (duration != null && match.offsetMs > duration - 500) {
+            Log.i(TAG, "${np.match.title} runs past LRCLIB's ${duration / 1000} s: ignoring that length")
+            _state.update { s -> s.copy(now = s.now?.let { it.copy(lyrics = it.lyrics?.copy(durationMs = null)) }) }
+            lyricsCache[np.match.key]?.let { lyricsCache[np.match.key] = it.copy(durationMs = null) }
+        }
         val drift = np.positionAt(clip.startNanos) - match.offsetMs
         if (abs(drift) <= JUMP_MS) {
             pendingJump = null
@@ -435,6 +442,8 @@ class Engine(testFile: java.io.File? = null) {
         private const val JUMP_MS = 1_500L
         /** Drop to the listening screen after this long without hearing the shown song. */
         private const val GIVE_UP_MS = 40_000L
+        /** After a song's end, keep it on screen this long while the next one is recognized. */
+        private const val RAN_OUT_GRACE_MS = 8_000L
         private const val GAP_DROP_DB = 14f
         private const val GAP_RESUME_MS = 600L
         /** Re-check a known song this often. */
