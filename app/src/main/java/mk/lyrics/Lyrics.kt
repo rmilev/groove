@@ -23,7 +23,7 @@ data class Lyrics(val lines: List<Line>, val synced: Boolean, val durationMs: Lo
 
 /** LRCLIB (lrclib.net): a free, open database of time-synced lyrics. */
 object Lrclib {
-    private const val AGENT = "MK Lyrics 0.1 (https://github.com/rmilev/mk-tv)"
+    private const val AGENT = "Groove 1.1 (https://github.com/rmilev/mk-tv)"
 
     fun find(title: String, artist: String, album: String?): Lyrics? {
         val t = cleanTitle(title)

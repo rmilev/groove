@@ -5,7 +5,7 @@
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.software.leanback" android:required="false" />
-    <application android:label="@string/app_name" android:banner="@drawable/banner" android:icon="@drawable/banner" android:theme="@style/Theme.Lyrics" android:networkSecurityConfig="@xml/network">
+    <application android:label="@string/app_name" android:banner="@drawable/banner" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:theme="@style/Theme.Lyrics" android:networkSecurityConfig="@xml/network">
         <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="landscape">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

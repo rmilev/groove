@@ -104,7 +104,7 @@ private data class Theme(val background: Color, val primary: Color, val secondar
 private fun themeOf(colors: String?): Theme {
     val map = colors?.let { s -> Regex("""([a-z]):([0-9a-fA-F]{6})""").findAll(s).associate { it.groupValues[1] to it.groupValues[2] } }.orEmpty()
     fun c(k: String) = map[k]?.let { Color(0xFF000000 or it.toLong(16)) }
-    return Theme(c("b") ?: Color(0xFF22202A), c("p") ?: Color.White, c("s") ?: Color(0xFFFF5A7A))
+    return Theme(c("b") ?: Color(0xFF22202A), c("p") ?: Color.White, c("s") ?: Color(0xFF5DCAA5))
 }
 
 @Composable
@@ -195,7 +195,7 @@ private fun Listening(state: UiState, permission: Boolean?) {
             Pulse(active = permission != false && state.micError == null, fast = state.busy)
             Spacer(Modifier.height(36.dp))
             val (title, sub) = when {
-                permission == false -> "Microphone access needed" to "Press OK to allow Lyrics to listen to the music in the room."
+                permission == false -> "Microphone access needed" to "Press OK to allow Groove to listen to the music in the room."
                 state.micError != null -> "Can't use the microphone" to state.micError
                 else -> "Listening…" to null
             }
@@ -221,21 +221,37 @@ private fun Listening(state: UiState, permission: Boolean?) {
     }
 }
 
-/** Rings spreading out from a small disc, like sound. */
+/** The Groove record turning slowly while it listens; still and dimmed when it can't. */
 @Composable
 private fun Pulse(active: Boolean, fast: Boolean) {
-    val t by rememberInfiniteTransition(label = "pulse").animateFloat(
-        0f, 1f, infiniteRepeatable(tween(if (fast) 1_400 else 2_600, easing = LinearEasing)), label = "t",
+    val turn by rememberInfiniteTransition(label = "spin").animateFloat(
+        0f, 360f, infiniteRepeatable(tween(4_000, easing = LinearEasing)), label = "turn",
     )
-    Canvas(Modifier.size(180.dp)) {
+    val grooveColor = Color(0xFF1C3A32)
+    val dim = Color(0xFF1E6B55); val bright = Color(0xFFC8F7E6)
+    Canvas(Modifier.size(200.dp).graphicsLayer { rotationZ = if (active) turn else 0f; alpha = if (active) 1f else 0.4f }) {
         val c = Offset(size.width / 2, size.height / 2)
-        val maxR = size.minDimension / 2
-        if (active) for (k in 0 until 3) {
-            val p = (t + k / 3f) % 1f
-            drawCircle(Color(0xFFFF5A7A).copy(alpha = (1 - p) * 0.55f), radius = maxR * (0.25f + 0.75f * p), center = c, style = Stroke(2.dp.toPx()))
+        val unit = size.minDimension / 2 / 134f // the logo is drawn on a 134-radius disc
+        drawCircle(Color(0xFF09120F), 134 * unit, c)
+        var i = 0
+        for (r in 36 until 132 step 7) {
+            drawCircle(grooveColor, r * unit, c, style = Stroke((if (i++ % 3 == 0) 2.4f else 1.6f) * unit))
         }
-        drawCircle(Brush.radialGradient(listOf(Color(0xFFFF7A93), Color(0xFFE23B62)), c, maxR * 0.22f), maxR * 0.22f, c)
-        drawCircle(Ink, maxR * 0.05f, c)
+        // The lit groove brightens towards the needle point
+        val r = 92 * unit
+        val start = -90f; val sweep = 290f; val n = 48
+        for (k in 0 until n) {
+            val t = ((k + 0.5f) / n).let { it * it.coerceAtLeast(0f) }
+            drawArc(
+                lerp(dim, bright, t), start + sweep * k / n, sweep / n + 0.6f, useCenter = false,
+                topLeft = Offset(c.x - r, c.y - r), size = androidx.compose.ui.geometry.Size(2 * r, 2 * r),
+                style = Stroke(7 * unit, cap = if (k == 0 || k == n - 1) androidx.compose.ui.graphics.StrokeCap.Round else androidx.compose.ui.graphics.StrokeCap.Butt),
+            )
+        }
+        val end = Math.toRadians((start + sweep).toDouble())
+        drawCircle(Color(0xFFF2FFFA), 8 * unit, Offset(c.x + r * kotlin.math.cos(end).toFloat(), c.y + r * kotlin.math.sin(end).toFloat()))
+        drawCircle(Color(0xFF5DCAA5), 22 * unit, c)
+        drawCircle(Color(0xFF09120F), 5 * unit, c)
     }
 }
 
@@ -271,22 +287,25 @@ private fun Backdrop(np: NowPlaying, modifier: Modifier, blur: Dp = 0.dp, alignm
     }
 }
 
-// ----- Stage: the artist on the right, lyrics large on the left over a dark fade, small album tag
+// ----- Stage: the artist on the left, lyrics large on the right over a dark fade, small album tag
 
 @Composable
 private fun Stage(np: NowPlaying, theme: Theme, position: () -> Long, listening: Boolean) {
-    Box(Modifier.fillMaxSize()) {
-        Backdrop(np, Modifier.fillMaxHeight().fillMaxWidth(0.68f).align(Alignment.CenterEnd), alignment = Alignment.TopCenter)
-        // The photo dissolves into the dark on the left and bottom
-        Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to Ink, 0.34f to Ink.copy(alpha = 0.96f), 0.62f to Ink.copy(alpha = 0.55f), 1f to Ink.copy(alpha = 0.1f))))
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val w = with(LocalDensity.current) { maxWidth.toPx() }
+        Backdrop(np, Modifier.fillMaxHeight().fillMaxWidth(0.68f).align(Alignment.CenterStart), alignment = Alignment.TopCenter)
+        // The photo dissolves into the dark on the right and bottom
+        Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(0f to Ink.copy(alpha = 0.1f), 0.38f to Ink.copy(alpha = 0.55f), 0.66f to Ink.copy(alpha = 0.96f), 1f to Ink)))
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.55f to Color.Transparent, 1f to Ink.copy(alpha = 0.85f))))
         // A wash of the album's colour from the corner
-        Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(theme.accent.copy(alpha = 0.18f), Color.Transparent), Offset(0f, 0f), 1400f)))
+        Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(theme.accent.copy(alpha = 0.18f), Color.Transparent), Offset(w, 0f), 1400f)))
 
-        Box(Modifier.fillMaxHeight().fillMaxWidth(0.64f).padding(start = 80.dp, top = 24.dp, bottom = 120.dp)) {
+        Box(Modifier.fillMaxHeight().fillMaxWidth(0.6f).align(Alignment.CenterEnd).padding(end = 72.dp, top = 24.dp, bottom = 120.dp)) {
             LyricsArea(np, position, LyricStyle(size = 42.sp, align = TextAlign.Start, anchor = 0.36f))
         }
-        AlbumTag(np, position, theme, listening, Modifier.align(Alignment.BottomStart).padding(start = 80.dp, bottom = 44.dp))
+        Box(Modifier.fillMaxWidth(0.6f).align(Alignment.BottomEnd).padding(end = 72.dp, bottom = 44.dp)) {
+            AlbumTag(np, position, theme, listening, Modifier)
+        }
     }
 }
 
@@ -378,7 +397,7 @@ private fun Cover(np: NowPlaying, size: Dp, corner: Dp) {
 @Composable
 private fun ListeningDot() {
     val a by rememberInfiniteTransition(label = "dot").animateFloat(0.25f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "a")
-    Box(Modifier.size(8.dp).graphicsLayer { alpha = a }.background(Color(0xFFFF5A7A), CircleShape))
+    Box(Modifier.size(8.dp).graphicsLayer { alpha = a }.background(Color(0xFF5DCAA5), CircleShape))
 }
 
 /** Small cover with title, artist and a slim progress bar. */
