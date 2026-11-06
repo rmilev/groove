@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cover images only: a fallback for devices that can't verify Apple's image CDN certificate -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">mzstatic.com</domain>
+    </domain-config>
+</network-security-config>
