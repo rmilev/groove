@@ -26,6 +26,8 @@ data class NowPlaying(
     val lyrics: Lyrics? = null,
     val lyricsLoading: Boolean = true,
     val art: ImageBitmap? = null,
+    /** Everyone credited, when there's more than Shazam's one artist ("A feat. B & C"). */
+    val credit: String? = null,
     /** Photos of the artist for the background, shown in turn; filled in as they load. */
     val artistImages: List<ImageBitmap> = emptyList(),
     /** At [anchorNanos] (System.nanoTime) the song was at [anchorMs]. */
@@ -36,6 +38,8 @@ data class NowPlaying(
 ) {
     fun positionAt(nanos: Long) = anchorMs + ((nanos - anchorNanos) / 1_000_000.0 * rate).toLong()
     val durationMs get() = lyrics?.durationMs
+    /** The artist line to show. */
+    val artistLine get() = credit ?: match.artist
 }
 
 data class UiState(
@@ -53,8 +57,9 @@ data class UiState(
 /**
  * Listens all the time, recognizes, and keeps the lyrics in time:
  * - while searching, tries growing clips (4, 7, 10 s) then every 8 s;
- * - once a song is known, re-checks every 8 s, so a skip, a seek or a new song shows within seconds;
- * - a break in the sound (a skip, the groove between tracks) brings the next check forward to 3.5 s after it;
+ * - once a song is known, re-checks every 5 s, so a skip, a seek or a new song shows within seconds;
+ * - a break in the sound (a skip, the groove between tracks) or a sudden jump in loudness brings the next check
+ *   forward to 3 s after it, with one retry 2 s later;
  * - talk over the music or a repeated chorus can't knock it off: misses keep the lyrics running, and a jump within
  *   the song must be confirmed by a second check.
  */
@@ -158,6 +163,27 @@ class Engine(testFile: java.io.File? = null) {
 
     private var checkSince = 0L
     private var gapCheck = false
+    private var gapRetry = false
+    private var lastJumpNanos = 0L
+
+    /**
+     * The last 1.5 s are much louder or quieter than the 6 s before: often a different song.
+     * Returns the mic mark where the change happened. A false alarm only costs an early check.
+     */
+    private fun loudnessJump(): Long? {
+        val chunk = Mic.LEVEL_WINDOW_MS
+        val recent = (1_500 / chunk).toInt(); val before = (6_000 / chunk).toInt()
+        val levels = mic.recentLevels(7_500)
+        if (levels.size < recent + before) return null
+        val a = levels.takeLast(recent).average()
+        val b = levels.dropLast(recent).takeLast(before).average()
+        if (abs(a - b) < JUMP_DB) return null
+        val now = System.nanoTime()
+        if (now - lastJumpNanos < 8_000_000_000L) return null
+        lastJumpNanos = now
+        Log.i(TAG, "loudness jump ${"%.0f".format(b)} → ${"%.0f".format(a)} dB")
+        return mic.mark() - recent * chunk * Signature.SAMPLE_RATE / 1000
+    }
     private var lastMatchNanos = 0L
     /** A match that put us somewhere else in the same song; acted on only once a second check agrees. */
     private var pendingJump: Pair<Long, Long>? = null
@@ -170,9 +196,11 @@ class Engine(testFile: java.io.File? = null) {
         if (duration != null && np.positionAt(now) > duration + 1_000) return beginSearch(ended = true)
 
         // A break in the sound (a skip, or the groove between tracks): check again as soon as there's enough new audio
-        gapJustEnded(minQuietMs = 250)?.let { mark ->
+        // A sudden jump in loudness does the same: a skip doesn't always leave silence the mic can hear
+        (gapJustEnded(minQuietMs = 250) ?: loudnessJump())?.let { mark ->
             checkSince = mark
             gapCheck = true
+            gapRetry = true
             nextCheckNanos = now + (GAP_CHECK_MS - mic.recordedSince(mark)).coerceAtLeast(0) * 1_000_000
         }
 
@@ -192,6 +220,13 @@ class Engine(testFile: java.io.File? = null) {
                 // Only after several misses in a row look for a new song (still showing this one meanwhile).
                 if (!wasGapCheck) misses++
                 nextCheckNanos = now + 5_000_000_000L
+                // Right after a break the new song may need a little more audio: try once more soon, from the break on
+                if (wasGapCheck && gapRetry) {
+                    gapRetry = false
+                    checkSince = since
+                    gapCheck = true
+                    nextCheckNanos = now + GAP_RETRY_MS * 1_000_000
+                }
                 if (misses >= 3) beginSearch(ended = false)
             }
             match.key != np.match.key -> show(match, clip)
@@ -295,9 +330,21 @@ class Engine(testFile: java.io.File? = null) {
         val lyrics = runCatching { withContext(Dispatchers.IO) { Lrclib.find(match.title, match.artist, match.album) } }
             .onFailure { Log.w(TAG, "lyrics failed", it) }
         if (lyrics.isSuccess) lyricsCache[match.key] = lyrics.getOrNull()
+        scope.launch { loadCredit(match, lyrics.getOrNull()?.durationMs) }
         _state.update { s ->
             if (s.now?.match?.key != match.key) s else s.copy(now = s.now.copy(lyrics = lyrics.getOrNull(), lyricsLoading = false))
         }
+    }
+
+    private val creditCache = HashMap<String, String?>()
+
+    private suspend fun loadCredit(match: Match, durationMs: Long?) {
+        if (Regex("""(?i)(,|&| feat\.?| ft\.?| with | x )""").containsMatchIn(match.artist + " " + match.title)) return // already lists them
+        val credit = if (creditCache.containsKey(match.key)) creditCache[match.key] else
+            runCatching { withContext(Dispatchers.IO) { MusicBrainz.fullCredit(match.title, match.artist, durationMs) } }
+                .onFailure { Log.w(TAG, "credits failed", it) }.getOrNull().also { creditCache[match.key] = it }
+        if (credit != null) Log.i(TAG, "credit: $credit")
+        _state.update { s -> if (s.now?.match?.key != match.key) s else s.copy(now = s.now.copy(credit = credit)) }
     }
 
     private suspend fun loadArt(match: Match) {
@@ -306,7 +353,7 @@ class Engine(testFile: java.io.File? = null) {
         _state.update { s -> if (s.now?.match?.key != match.key) s else s.copy(now = s.now.copy(art = bitmap)) }
     }
 
-    private fun artistKey(match: Match) = AudioDb.key(Lrclib.mainArtist(match.artist))
+    private fun artistKey(match: Match) = AudioDb.key(Lrclib.withoutGuests(match.artist))
 
     /** Shazam's artist photo first (quick), then TheAudioDB's widescreen ones as they arrive. */
     private suspend fun loadPhotos(match: Match) {
@@ -391,9 +438,11 @@ class Engine(testFile: java.io.File? = null) {
         private const val GAP_DROP_DB = 14f
         private const val GAP_RESUME_MS = 600L
         /** Re-check a known song this often. */
-        private const val CHECK_EVERY_MS = 8_000L
-        private const val CHECK_CLIP_MS = 6_000L
+        private const val CHECK_EVERY_MS = 5_000L
+        private const val CHECK_CLIP_MS = 4_500L
         /** After a break in the sound, check once this much new audio is in. */
-        private const val GAP_CHECK_MS = 3_500L
+        private const val GAP_CHECK_MS = 3_000L
+        private const val GAP_RETRY_MS = 2_000L
+        private const val JUMP_DB = 9.0
     }
 }

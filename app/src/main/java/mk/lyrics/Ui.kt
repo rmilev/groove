@@ -348,7 +348,7 @@ private fun Glass(np: NowPlaying, theme: Theme, position: () -> Long, listening:
             Spacer(Modifier.width(16.dp))
             Column {
                 Text(np.match.title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 520.dp))
-                Text(listOfNotNull(np.match.artist, np.match.album).joinToString("  ·  "), color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 520.dp))
+                Text(listOfNotNull(np.artistLine, np.match.album).joinToString("  ·  "), color = Color.White.copy(alpha = 0.7f), fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 520.dp))
             }
             if (listening) { Spacer(Modifier.width(18.dp)); ListeningDot() }
         }
@@ -394,7 +394,7 @@ private fun Cinema(np: NowPlaying, theme: Theme, position: () -> Long, listening
             if (listening) { ListeningDot(); Spacer(Modifier.width(14.dp)) }
             Column(horizontalAlignment = Alignment.End) {
                 Text(np.match.title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 360.dp))
-                Text(np.match.artist, color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 360.dp))
+                Text(np.artistLine, color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 360.dp))
                 np.match.album?.let {
                     Text(it, color = Color.White.copy(alpha = 0.45f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 360.dp))
                 }
@@ -435,7 +435,7 @@ private fun AlbumTag(np: NowPlaying, position: () -> Long, theme: Theme, listeni
                 Text(np.match.title, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                 if (listening) { Spacer(Modifier.width(10.dp)); ListeningDot() }
             }
-            Text(listOfNotNull(np.match.artist, np.match.album).joinToString("  ·  "), color = Color.White.copy(alpha = 0.62f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(listOfNotNull(np.artistLine, np.match.album).joinToString("  ·  "), color = Color.White.copy(alpha = 0.62f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.height(10.dp))
             ProgressLine(position, np.durationMs, theme.accent)
         }

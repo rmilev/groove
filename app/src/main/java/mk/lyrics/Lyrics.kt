@@ -27,9 +27,15 @@ object Lrclib {
 
     fun find(title: String, artist: String, album: String?): Lyrics? {
         val t = cleanTitle(title)
-        val a = mainArtist(artist)
-        val results = search("track_name=${enc(t)}&artist_name=${enc(a)}")
-            .ifEmpty { search("q=${enc("$a $t")}") }
+        // The whole artist name first ("Tyler, The Creator"), then the first of several ("Tyler")
+        var a = ""
+        var results = emptyList<Record>()
+        for (name in artistNames(artist)) {
+            a = name
+            results = search("track_name=${enc(t)}&artist_name=${enc(name)}")
+            if (results.isNotEmpty()) break
+        }
+        if (results.isEmpty()) results = search("q=${enc("${withoutGuests(artist)} $t")}")
         if (results.isEmpty()) return null
         // Same song by the same artist; synced lyrics first, then the album we heard
         val candidates = results.filter { same(it.title, t) && (same(it.artist, a) || norm(it.artist).contains(norm(a))) }
@@ -96,7 +102,15 @@ object Lrclib {
         .replace(Regex("""\s+-\s+.*(remaster|version|edit|mix|live|mono|stereo).*$""", RegexOption.IGNORE_CASE), "")
         .trim()
 
-    /** "A feat. B" / "A & B" → "A" */
+    /** "A feat. B" / "A (with B)" → "A", but names with commas or "&" kept whole: "Tyler, The Creator", "Simon & Garfunkel". */
+    fun withoutGuests(a: String) = a
+        .replace(Regex("""\s*[(\[]\s*(feat\.?|ft\.?|featuring|with)\s[^)\]]*[)\]]""", RegexOption.IGNORE_CASE), "")
+        .split(Regex("""\s+(feat\.?|ft\.?|featuring)\s+""", RegexOption.IGNORE_CASE)).first().trim()
+
+    /** Names to try for an artist, most exact first: the whole name without guests, then just the first of several. */
+    fun artistNames(a: String) = listOf(withoutGuests(a), mainArtist(a)).filter { it.isNotBlank() }.distinct()
+
+    /** "A feat. B" / "A & B" / "A, B" → "A" */
     fun mainArtist(a: String) = a.split(Regex("""\s+(feat\.?|ft\.?|featuring|x|with)\s+|\s*[,&]\s*""", RegexOption.IGNORE_CASE)).first().trim()
 
     private fun same(a: String, b: String) = norm(a) == norm(b) || norm(cleanTitle(a)) == norm(cleanTitle(b))

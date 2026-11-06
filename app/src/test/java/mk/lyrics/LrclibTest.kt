@@ -17,14 +17,21 @@ class LrclibTest {
         assertEquals("Hey Jude", Lrclib.cleanTitle("Hey Jude - 2015 Remaster"))
         assertEquals("Calvin Harris", Lrclib.mainArtist("Calvin Harris feat. Rihanna"))
         assertEquals("Simon", Lrclib.mainArtist("Simon & Garfunkel"))
+        assertEquals("Tyler, The Creator", Lrclib.withoutGuests("Tyler, The Creator"))
+        assertEquals("Tyler, The Creator", Lrclib.withoutGuests("Tyler, The Creator feat. Kali Uchis"))
+        assertEquals("Fatima Al Qadiri", Lrclib.withoutGuests("Fatima Al Qadiri (feat. Gumar)"))
+        assertEquals(listOf("Simon & Garfunkel", "Simon"), Lrclib.artistNames("Simon & Garfunkel"))
     }
 
     @Test fun findsLiveLyrics() {
         if (System.getenv("LIVE") == null) return
-        for ((t, a, al) in listOf(Triple("Bohemian Rhapsody", "Queen", "A Night at the Opera"), Triple("The Sound of Silence", "Simon & Garfunkel", null), Triple("Ash", "Secession Studios", "Epic Classics"))) {
+        for ((t, a, al) in listOf(Triple("Bohemian Rhapsody", "Queen", "A Night at the Opera"), Triple("The Sound of Silence", "Simon & Garfunkel", null), Triple("Ash", "Secession Studios", "Epic Classics"), Triple("RING RING RING", "Tyler, The Creator", null))) {
             val l = Lrclib.find(t, a, al)
             println("LIVE $t: synced=${l?.synced} lines=${l?.lines?.size} dur=${l?.durationMs} instrumental=${l?.instrumental} first=${l?.lines?.firstOrNull()}")
         }
+        println("LIVE credit: " + MusicBrainz.fullCredit("Yeah Right", "Vince Staples", 188_950))
+        println("LIVE credit (none expected): " + MusicBrainz.fullCredit("Bohemian Rhapsody", "Queen", 355_000))
+        for (a in listOf("Tyler, The Creator", "Simon & Garfunkel", "Queen")) println("LIVE photos $a: ${AudioDb.photos(a).size}")
         assertTrue(true)
     }
 }
