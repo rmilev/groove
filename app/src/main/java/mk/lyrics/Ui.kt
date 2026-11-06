@@ -134,6 +134,18 @@ fun LyricsApp(
     val np = state.now
     val showing = np != null && !state.ended
 
+    // Which artist photo is up. Kept here, above the looks, so switching looks doesn't start the photos over.
+    var photoTurn by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(np?.match?.artist) { while (true) { delay(PHOTO_EVERY_MS); photoTurn++ } }
+    val photos = np?.artistImages.orEmpty()
+    // A fresh random order for every song, so the same artist's photos don't come round the same way each time
+    val seed = remember(np?.match?.key) { kotlin.random.Random.nextInt() }
+    // Picked once per turn (and when the first photo arrives), so photos still loading don't reshuffle what's shown
+    val photo = remember(photoTurn, seed, photos.isEmpty()) {
+        if (photos.isEmpty()) null
+        else photos[photos.indices.shuffled(kotlin.random.Random(seed))[(photoTurn % photos.size).toInt()]]
+    }
+
     Box(
         Modifier.fillMaxSize().background(Ink)
             .focusRequester(focus).focusable()
@@ -167,7 +179,7 @@ fun LyricsApp(
             label = "screen",
         ) { (key, d) ->
             if (key.isEmpty() || np == null) Listening(state, permission)
-            else NowPlayingScreen(np, d, offsetMs, state.searching || state.busy)
+            else CompositionLocalProvider(LocalPhoto provides photo) { NowPlayingScreen(np, d, offsetMs, state.searching || state.busy) }
         }
 
         AnimatedVisibility(toast != null, Modifier.align(Alignment.BottomCenter).padding(bottom = 36.dp), enter = fadeIn(), exit = fadeOut()) {
@@ -267,12 +279,7 @@ private fun NowPlayingScreen(np: NowPlaying, design: Design, offsetMs: Long, lis
     LaunchedEffect(np) { while (true) withFrameNanos { position = np.positionAt(it) + offsetMs } }
     val theme = themeOf(np.match.colors)
     val pos = { position }
-    // Move on to the next artist photo now and then
-    var photoTurn by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(np.match.key) { while (true) { delay(PHOTO_EVERY_MS); photoTurn++ } }
-    val photos = np.artistImages
-    val photo = if (photos.isEmpty()) null else photos[(photoTurn % photos.size).toInt()]
-    CompositionLocalProvider(LocalPhoto provides photo) { Designs(np, design, theme, pos, listening) }
+    Designs(np, design, theme, pos, listening)
 }
 
 private const val PHOTO_EVERY_MS = 40_000L
