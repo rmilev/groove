@@ -33,6 +33,9 @@ class MainActivity : ComponentActivity() {
                 onOffset = { prefs.edit().putLong("offsetMs", it).apply() },
                 initialDesign = Design.entries.firstOrNull { it.name == prefs.getString("design", null) } ?: Design.Stage,
                 onDesign = { prefs.edit().putString("design", it.name).apply() },
+                initialVisual = Visual.entries.firstOrNull { it.name == prefs.getString("visual", null) } ?: Visual.Aurora,
+                onVisual = { prefs.edit().putString("visual", it.name).apply() },
+                audio = { buf -> engine?.audio(buf) ?: 0L },
                 onResync = { engine?.resync() },
                 onAskPermission = { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1) },
             )

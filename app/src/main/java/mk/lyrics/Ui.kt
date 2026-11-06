@@ -118,11 +118,17 @@ fun LyricsApp(
     onOffset: (Long) -> Unit,
     initialDesign: Design,
     onDesign: (Design) -> Unit,
+    initialVisual: Visual,
+    onVisual: (Visual) -> Unit,
+    audio: (ShortArray) -> Long,
     onResync: () -> Unit,
     onAskPermission: () -> Unit,
 ) {
     var offsetMs by remember { mutableLongStateOf(initialOffsetMs) }
     var design by remember { mutableStateOf(initialDesign) }
+    var visual by remember { mutableStateOf(initialVisual) }
+    // Up/Down on the listening screen brings the visual up straight away, without waiting
+    var visualAsked by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
     var toastId by remember { mutableLongStateOf(0L) }
     fun flash(s: String) { toast = s; toastId++ }
@@ -133,6 +139,7 @@ fun LyricsApp(
 
     val np = state.now
     val showing = np != null && !state.ended
+    LaunchedEffect(showing) { if (showing) visualAsked = false }
 
     // Which artist photo is up. Kept here, above the looks, so switching looks doesn't start the photos over.
     var photoTurn by remember { mutableLongStateOf(0L) }
@@ -158,7 +165,16 @@ fun LyricsApp(
                         flash(offsetLabel(offsetMs))
                         true
                     }
-                    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> if (!showing) {
+                        // Listening: Up/Down picks the visual
+                        val all = Visual.entries
+                        visual = if (!visualAsked && visual != Visual.Record) visual
+                            else all[(visual.ordinal + if (code == KeyEvent.KEYCODE_DPAD_DOWN) 1 else all.size - 1) % all.size]
+                        visualAsked = true
+                        onVisual(visual)
+                        flash("Visuals: ${visual.label}")
+                        true
+                    } else {
                         val all = Design.entries
                         design = all[(design.ordinal + if (code == KeyEvent.KEYCODE_DPAD_DOWN) 1 else all.size - 1) % all.size]
                         onDesign(design)
@@ -178,7 +194,7 @@ fun LyricsApp(
             transitionSpec = { fadeIn(tween(900)) togetherWith fadeOut(tween(700)) },
             label = "screen",
         ) { (key, d) ->
-            if (key.isEmpty() || np == null) Listening(state, permission)
+            if (key.isEmpty() || np == null) Listening(state, permission, visual, visualAsked, audio)
             else CompositionLocalProvider(LocalPhoto provides photo) { NowPlayingScreen(np, d, offsetMs, state.searching || state.busy) }
         }
 
@@ -203,8 +219,58 @@ private fun offsetLabel(ms: Long) = when {
 
 // ---------------------------------------------------------------- listening
 
+/** Show the visual after listening this long to music it doesn't know. */
+private const val VISUAL_AFTER_MS = 12_000L
+
 @Composable
-private fun Listening(state: UiState, permission: Boolean?) {
+private fun Listening(state: UiState, permission: Boolean?, visual: Visual, asked: Boolean, audio: (ShortArray) -> Long) {
+    val ok = permission != false && state.micError == null
+    var waited by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { delay(VISUAL_AFTER_MS); waited = true }
+    // Music in the room recently? A visual over silence is just a flat line, so then the record comes back.
+    var heard by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val buf = ShortArray(Signature.SAMPLE_RATE)
+        var lastSound = 0L
+        while (true) {
+            val n = minOf(audio(buf), buf.size.toLong()).toInt()
+            var sum = 0.0
+            for (i in buf.size - n until buf.size) sum += buf[i] * buf[i].toDouble()
+            val db = 20 * kotlin.math.log10(maxOf(kotlin.math.sqrt(sum / maxOf(n, 1)), 1.0) / 32768)
+            val now = System.nanoTime()
+            if (db > -66) lastSound = now
+            heard = lastSound != 0L && now - lastSound < 6_000_000_000L
+            delay(500)
+        }
+    }
+    val on = ok && visual != Visual.Record && (asked || (waited && heard))
+    Box(Modifier.fillMaxSize()) {
+        AnimatedVisibility(on, enter = fadeIn(tween(1_500)), exit = fadeOut(tween(1_000))) {
+            Visualizer(visual, audio)
+        }
+        Crossfade(on, animationSpec = tween(900), label = "listening") { small ->
+            if (small) ListeningBadge(state) else ListeningCentre(state, permission)
+        }
+    }
+}
+
+/** While a visual plays: the record small in the corner, still listening. */
+@Composable
+private fun ListeningBadge(state: UiState) {
+    Box(Modifier.fillMaxSize().padding(start = 52.dp, bottom = 44.dp), contentAlignment = Alignment.BottomStart) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Pulse(active = true, fast = state.busy, diameter = 46.dp)
+            Spacer(Modifier.width(14.dp))
+            Column {
+                Text("Listening…", color = Color.White.copy(alpha = 0.85f), fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                Text("▲ ▼  visuals", color = Color(0xFF8A8A9A), fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ListeningCentre(state: UiState, permission: Boolean?) {
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Pulse(active = permission != false && state.micError == null, fast = state.busy)
@@ -238,13 +304,13 @@ private fun Listening(state: UiState, permission: Boolean?) {
 
 /** The Groove record turning slowly while it listens; still and dimmed when it can't. */
 @Composable
-private fun Pulse(active: Boolean, fast: Boolean) {
+private fun Pulse(active: Boolean, fast: Boolean, diameter: Dp = 200.dp) {
     val turn by rememberInfiniteTransition(label = "spin").animateFloat(
         0f, 360f, infiniteRepeatable(tween(4_000, easing = LinearEasing)), label = "turn",
     )
     val grooveColor = Color(0xFF1C3A32)
     val dim = Color(0xFF1E6B55); val bright = Color(0xFFC8F7E6)
-    Canvas(Modifier.size(200.dp).graphicsLayer { rotationZ = if (active) turn else 0f; alpha = if (active) 1f else 0.4f }) {
+    Canvas(Modifier.size(diameter).graphicsLayer { rotationZ = if (active) turn else 0f; alpha = if (active) 1f else 0.4f }) {
         val c = Offset(size.width / 2, size.height / 2)
         val unit = size.minDimension / 2 / 134f // the logo is drawn on a 134-radius disc
         drawCircle(Color(0xFF09120F), 134 * unit, c)

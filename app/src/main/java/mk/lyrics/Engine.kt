@@ -57,11 +57,13 @@ data class UiState(
 /**
  * Listens all the time, recognizes, and keeps the lyrics in time:
  * - while searching, tries growing clips (4, 7, 10 s) then every 8 s;
- * - once a song is known, re-checks every 10 s, so a skip, a seek or a new song shows within seconds;
+ * - once a song is known, re-checks every 7 s, and every 4 s in its last stretch, so a skip, a seek or the next
+ *   song shows within seconds;
  * - a break in the sound (a skip, the groove between tracks) or a sudden jump in loudness brings the next check
  *   forward to 3 s after it, with one retry 2 s later;
  * - talk over the music or a repeated chorus can't knock it off: misses keep the lyrics running, and a jump within
- *   the song must be confirmed by a second check.
+ *   the song must be confirmed by a second check;
+ * - the room going as quiet as an empty room (playback stopped) ends the song once a check confirms it.
  */
 class Engine(testFile: java.io.File? = null, private val debugDir: java.io.File? = null) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -102,6 +104,9 @@ class Engine(testFile: java.io.File? = null, private val debugDir: java.io.File?
         mic.stop()
     }
 
+    /** The newest audio from the microphone, for the visuals: fills [out], returns the total samples recorded so far. */
+    fun audio(out: ShortArray) = mic.latest(out)
+
     /** OK on the remote: check the song and position right now. */
     fun resync() { resyncRequested = true }
 
@@ -138,7 +143,7 @@ class Engine(testFile: java.io.File? = null, private val debugDir: java.io.File?
         if (shown != null && !_state.value.ended) {
             // Still showing the last song while looking: give up on it once it should be over, or nothing has matched for a while
             val over = shown.durationMs?.let { shown.positionAt(now) > it + RAN_OUT_GRACE_MS } == true
-            if (over || now - lastMatchNanos > GIVE_UP_MS * 1_000_000) _state.update { it.copy(ended = true) }
+            if (over || now - lastMatchNanos > GIVE_UP_MS * 1_000_000 || roomQuiet()) _state.update { it.copy(ended = true) }
         }
         // Sound coming back after silence: start over with only the new audio
         gapJustEnded(minQuietMs = 600)?.let { searchMark = it; searchAttempts = 0 }
@@ -165,6 +170,15 @@ class Engine(testFile: java.io.File? = null, private val debugDir: java.io.File?
     private var gapCheck = false
     private var gapRetry = false
     private var lastJumpNanos = 0L
+    private var quietChecked = false
+
+    /** The last few seconds were as quiet as an empty room, not just a soft passage: playback has stopped. */
+    private fun roomQuiet(): Boolean {
+        val levels = mic.recentLevels(STOPPED_MS)
+        if (levels.size < STOPPED_MS / Mic.LEVEL_WINDOW_MS - 1) return false
+        // Nearly all of it below the empty-room level; a soft guitar part still has notes poking above
+        return levels.sorted()[levels.size * 9 / 10] < SILENT_DB
+    }
 
     /**
      * The last 1.5 s are much louder or quieter than the 6 s before: often a different song.
@@ -194,6 +208,25 @@ class Engine(testFile: java.io.File? = null, private val debugDir: java.io.File?
 
         // Song ran out: look for the next one, still showing this one until it's found (or it's clearly over)
         if (duration != null && np.positionAt(now) > duration + 1_000) return beginSearch(ended = false)
+
+        // Playback stopped: the room has gone as quiet as an empty one. Make sure with a check (a very quiet passage
+        // still matches), then go back to listening.
+        if (roomQuiet()) {
+            if (!quietChecked && now - lastRequestNanos >= MIN_GAP_MS * 1_000_000 && now >= backoffUntil) {
+                quietChecked = true
+                val clip = mic.clip(CHECK_CLIP_MS) ?: return
+                val match = recognize(clip)
+                when {
+                    match == null -> { Log.i(TAG, "music stopped"); return beginSearch(ended = true) }
+                    match.key != np.match.key -> return show(match, clip)
+                    else -> return sameSong(np, clip, match)
+                }
+            }
+        } else quietChecked = false
+
+        // The last stretch of the song: check more often, so the next one shows as soon as it starts
+        val left = duration?.let { it - np.positionAt(now) }
+        if (left != null && left < NEAR_END_MS && now >= slowUntil) nextCheckNanos = minOf(nextCheckNanos, lastRequestNanos + MIN_GAP_MS * 1_000_000)
 
         // A break in the sound (a skip, or the groove between tracks): check again as soon as there's enough new audio
         // A sudden jump in loudness does the same: a skip doesn't always leave silence the mic can hear
@@ -420,21 +453,23 @@ class Engine(testFile: java.io.File? = null, private val debugDir: java.io.File?
         var i = window.size - 1
         var soundChunks = 0
         while (i >= 0 && window[i] > threshold) { soundChunks++; i-- }
-        if (soundChunks < after || soundChunks > after + 12) return null
+        // Up to ~4 s after the sound came back, so a gap that ended while a recognition was in flight still counts
+        if (soundChunks < after || soundChunks > after + 50) return null
         var quiet = 0
         while (i >= 0 && window[i] <= threshold) { quiet++; i-- }
         if (i < 0) return null // the quiet started before our history: not a gap between songs
         val quietMs = quiet * chunk
         if (quietMs < minQuietMs || quietMs > 8_000) return null
-        // Only report each gap once: it must have ended just now
+        // Only report each gap once
         val endedAgoMs = soundChunks * chunk
-        if (lastGapReportedNanos != 0L && System.nanoTime() - lastGapReportedNanos < 4_000_000_000L) return null
-        lastGapReportedNanos = System.nanoTime()
-        Log.i(TAG, "gap of $quietMs ms (music ${"%.0f".format(loud)} dB)")
-        return mic.mark() - endedAgoMs * Signature.SAMPLE_RATE / 1000
+        val mark = mic.mark() - endedAgoMs * Signature.SAMPLE_RATE / 1000
+        if (abs(mark - lastGapMark) < Signature.SAMPLE_RATE * 2L) return null
+        lastGapMark = mark
+        Log.i(TAG, "gap of $quietMs ms, ended ${endedAgoMs} ms ago (music ${"%.0f".format(loud)} dB)")
+        return mark
     }
 
-    private var lastGapReportedNanos = 0L
+    private var lastGapMark = -1_000_000L
 
     /** Bring quiet microphone audio up to a healthy level so the fingerprint finds enough peaks. */
     private fun normalize(s: ShortArray): ShortArray {
@@ -457,7 +492,11 @@ class Engine(testFile: java.io.File? = null, private val debugDir: java.io.File?
         private const val GAP_DROP_DB = 14f
         private const val GAP_RESUME_MS = 600L
         /** Re-check a known song this often. */
-        private const val CHECK_EVERY_MS = 10_000L
+        private const val CHECK_EVERY_MS = 7_000L
+        /** In a song's last this-many ms, check as often as allowed. */
+        private const val NEAR_END_MS = 15_000L
+        /** This long as quiet as an empty room means playback stopped. */
+        private const val STOPPED_MS = 5_000L
         /** Never ask Shazam more often than this. */
         private const val MIN_GAP_MS = 4_000L
         private const val CHECK_CLIP_MS = 4_500L

@@ -147,6 +147,17 @@ class Mic(
         Clip(out, anchorNanos + (from - anchorFrame) * 1_000_000_000L / RATE)
     }
 
+    /**
+     * Copies the newest samples into [out] (oldest first). Returns the total recorded so far, so a caller can tell
+     * whether anything new came in: min(that, out.size) samples at the end of [out] are real.
+     */
+    fun latest(out: ShortArray): Long = synchronized(lock) {
+        val n = minOf(out.size.toLong(), written, ring.size.toLong()).toInt()
+        val from = written - n
+        for (i in 0 until n) out[out.size - n + i] = ring[((from + i) % ring.size).toInt()]
+        written
+    }
+
     /** Milliseconds of audio recorded since [mark]. */
     fun recordedSince(mark: Long): Long = synchronized(lock) { (written - mark) * 1000 / RATE }
 
