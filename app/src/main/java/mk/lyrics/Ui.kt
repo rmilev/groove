@@ -351,10 +351,13 @@ private fun Cinema(np: NowPlaying, theme: Theme, position: () -> Long, listening
             if (listening) { ListeningDot(); Spacer(Modifier.width(14.dp)) }
             Column(horizontalAlignment = Alignment.End) {
                 Text(np.match.title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 360.dp))
-                Text(np.match.artist, color = Color.White.copy(alpha = 0.65f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(np.match.artist, color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 360.dp))
+                np.match.album?.let {
+                    Text(it, color = Color.White.copy(alpha = 0.45f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 360.dp))
+                }
             }
             Spacer(Modifier.width(14.dp))
-            Cover(np, 52.dp, 8.dp)
+            Cover(np, 60.dp, 8.dp)
         }
         Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()) {
             val d = np.durationMs
